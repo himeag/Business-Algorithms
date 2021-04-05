@@ -1,0 +1,706 @@
+---
+title: "MKTG 6600 Final Project"
+author: "Meag Tessmann"
+date: "10/10/2020"
+output:
+  html_document: 
+    toc: true
+    toc_depth: 3
+    toc_float: true
+
+---
+# Description
+
+A movie chain in the southwest region, MovieMagic is considering ways in which it can increase spending on concessions. It has collected information of 2000 of its customers, some of whom are part of their loyalty program and some who are not. They have information on the following 8 variables, which they plan to use as predictors. They plan to use amount_spent (i.e. the amount spent on concessions) as the outcome variable since they have learnt from observations that much of the profit is derived from concession sales.
+
+## Predictors
+* *age* = age of the customer
+* *job* = type of job e.g. management, technician, entrepreneur,
+* *marital* = married, single, divorced
+* *education* = primary, secondary, tertiary
+* *seen_alone* = whether the movie was seen alone or with some others (yes/no)
+* *discount* = whether they were sent a discount coupon (yes/no)
+* *days_member* = days since member of MovieMagic
+* *movies_seen* = number of movies seen last time period
+
+## Outcome
+amount_spent = amount spent on concessions
+
+Their objective is to find out what factors can increase concession sales and how they can improve their prediction of the outcome variable so that they can plan better.
+
+Along with amount_spent, MovieMagic was also able to collect information form about 150 of its existing customers in the form of reviews. They feel that this text data can provide a different insight into what customers think and feel about MovieMagic.
+
+They realize that their objective has two components: interpretation and prediction. Hence, they decide to run 3 different types of analysis. - 1. Linear regression - 2. Support Vector Regression (SVR) - 3. Text analysis
+
+When the project, henceforth, mentions 3 analysis, the above-mentioned would be the 3 analysis. 
+
+Consider that you have been asked to run the analysis and answer the questions MovieMagic wants answered.
+
+
+---
+---
+---
+
+
+# Analysis
+
+
+## Libraries + Data
+
+```{r libraries, warning=F, message=F}
+
+# EDA + general
+library(skimr)
+library(tidyverse)
+library(psych)
+library(scales)
+library(knitr)
+library(kableExtra) # fancy tables
+library(rminer)
+library(effects)
+library(car)
+
+
+# model training
+library(caret)
+library(elasticnet)
+library(glmnet)
+library(ROCR)
+library(e1071)#to run svm
+
+# nlp
+library(quanteda)
+library(seededlda)
+library(topicmodels)
+library(RTextTools)
+library(wordcloud)
+library(tm)
+
+
+
+
+# Read in the data
+purchases <- read.csv("http://data.mishra.us/files/project_data.csv")
+reviews <- read.csv("http://data.mishra.us/files/project_reviews.csv")
+
+```
+
+
+## Descriptive Analytics
+
+
+### EDA: Purchasing dataset
+
+This dataset has five categorical variables and 4 numeric veriables, with no missing data in any observation. The majority of movie viewers:
+
+* are married
+* have a secondary education
+* are not seen along
+* are using a discount
+
+Ages range from 21 to 61, with a slight left skewing. On average, a person is seeing 1.9 movies and median spend rate is $216. 
+
+At first glance of a pairs panel, it appears 'experienced' movie goers, such as those who've seen a lot of movies at the theatre or who've been members for awhile, are spending less on concessions. 'Expereinced' movie-goers may be developing traditions or habits such as going to dinner beforehand or 'tricks' like bringing in their own food. When looking at just movies seen ~ spending, we find the outliers are mostly coming from those who are seeing 3 or fewer movies. There is a slight bump in 
+
+Those who were seen alone appear to spend less, though this may be misleading as we don't know the size of their group. I can only imagine those who are spending over 10k on consessions are hosting parties or large groups at the theatre. Might be worth looking at removing if they're outliers as this group would require a whole different marketing strategy catering towards coordinating groups. 
+
+``` {r eda}
+skim(purchases)
+pairs.panels(purchases) 
+
+hist(log(purchases$amount_spent))
+
+ggplot(purchases, aes(job, amount_spent)) + 
+  geom_boxplot() + 
+  scale_y_continuous(labels=dollar)
+
+ggplot(purchases, aes(education, amount_spent)) + 
+  geom_boxplot() + 
+  scale_y_continuous(labels=dollar)
+
+ggplot(purchases, aes(factor(movies_seen), amount_spent)) + 
+  geom_boxplot() + 
+  scale_y_continuous(labels=dollar)
+
+
+```
+
+
+### Linear Regression
+Linear regression model has an R-squared value of 0.02532, which seems very low for basing judegements on whether variables are correlated or not with the amount spent. There's two variables which are significant.
+
+``` {r model-lm}
+set.seed(123)
+model.lm.fullset <- lm(amount_spent ~., purchases)
+summary(model.lm.fullset) 
+
+# normally distributed residuals?
+mean(model.lm.fullset$residuals)
+
+# homoscedasticity?
+plot(model.lm.fullset)
+
+# multicollinearity?
+car::vif(model.lm.fullset)
+
+# autocorrelation
+lmtest::dwtest(model.lm.fullset)
+
+
+```
+
+
+
+### Modifications to LM
+I have a hypothesis that single individuals are hosting groups and spending a lot larger amount of money than normal. If true, I think these two groups would require different marketing strategies. For this, I predict large spending over \$1,000 separately from those which are under \$100, something a family 5 could spend on dinner and drinks at a theatre. Separating out these two groups results in two models both with higher R^2 values, niether of which would be high enough to feel comfortable basing heavy decisions on.
+
+I also look at a log function of amount_spent since it's highly skewed and zero-bounded.
+
+``` {r lm-alternatives}
+
+purchases_eng <- purchases %>% 
+  mutate(
+    isMember = factor(ifelse(days_member ==0, 0,1)),
+    movies_seen = factor(movies_seen)
+  )
+
+purchases_high <- purchases %>% 
+  filter(amount_spent>1000)
+
+purchases_low <- purchases %>% 
+  filter(amount_spent<100)
+
+## I was going to look into predicting if someone spent at all, but will reserve for another analysis. 
+# purchases_zero <- purchases_eng %>% 
+#   mutate(
+#     didPurchase = factor(ifelse(amount_spent==0, 0,1)),
+#   ) %>% 
+#   select(-amount_spent)
+
+
+model_low <- train(amount_spent ~., purchases_low, method='lm')
+summary(model_low) 
+
+model_high <- train(amount_spent ~., purchases_high, method='lm')
+summary(model_high) 
+
+model_log <- train(log(amount_spent+1) ~., purchases, method='lm')
+summary(model_log) 
+
+```
+
+
+
+## Predictive Analytics
+
+### One-hot and test/train
+Splitting the test and train sets in preparation for comparing prediction models.
+
+```{r test-train-split}
+
+one.hot <- as.data.frame(model.matrix(~. -1, purchases))
+set.seed(345)
+trainIndex <- sample(nrow(one.hot), (nrow(one.hot)*.7))
+train <- one.hot[trainIndex,]
+test <- one.hot[-trainIndex,]
+test_outcome <- test[,"amount_spent"]
+train_outcome <- train[,"amount_spent"]
+test <- test %>% select(-amount_spent)
+
+```
+
+### Reusable compare function
+
+A short function to quickly compare test and train RMSE calues across multiple models.
+``` {r predict-func}
+compare_models <- function(test, train, expected, model) {
+  predict_test <- predict(model, test)
+  predict_train <- predict(model, train)
+  
+  stats_svm <- as.matrix(rbind(
+    mmetric(train$amount_spent, predict_train,c("MAE","MSE","RMSE","RAE")),
+    mmetric(expected,predict_test,c("MAE","MSE","RMSE","RAE"))
+  ))
+  rownames(stats_svm) <- c("Train Set", "Test Set")
+  knitr::kable(stats_svm, digits=2, caption = deparse(substitute(model))) %>% 
+    kable_styling(bootstrap_options = c("hover"))
+}
+
+```
+
+### SVR Tuning
+
+Taking a couple tuning rounds using the e1071 tuning method. 
+
+``` {r svr-tuning}
+
+set.seed(123)
+model.svm.radial <- svm(amount_spent~., data= train, kernal='radial', cost=10, scale=FALSE)
+compare_models(test, train, test_outcome, model.svm.radial)
+
+set.seed(123)
+# perform grid search
+tuneResult <- tune(svm, amount_spent~., data= train,
+              ranges = list(epsilon = seq(0,1,0.1), cost = 2^(2:9))
+)
+print(tuneResult)
+# Draw the tuning graph
+plot(tuneResult)
+
+set.seed(123)
+tuneResult2 <- tune(svm, amount_spent~., data= train,
+              ranges = list(epsilon = seq(.42,.55,0.01), cost = seq(2,8,1))
+)
+print(tuneResult2) 
+plot(tuneResult2)
+
+set.seed(123)
+tuneResult3 <- tune(svm, amount_spent~., data= train,
+              ranges = list(epsilon = seq(.47,.49,0.005), cost = seq(.1,3.1,.5))
+)
+print(tuneResult3)
+plot(tuneResult3)
+
+set.seed(123)
+tuneResult4 <- tune(svm, amount_spent~., data= train,
+              ranges = list(epsilon = seq(.485,.51,0.005), cost = seq(.05,.15,.1))
+)
+print(tuneResult4)
+plot(tuneResult4)
+
+set.seed(500)
+tuneResult5 <- tune(svm, amount_spent~., data= train,
+              ranges = list(epsilon = seq(.5,.52,0.002), cost = seq(.14,.2,.01))
+)
+print(tuneResult5)
+plot(tuneResult5)
+
+
+model.svm.bestTune <- tuneResult5$best.model
+compare_models(test, train, test_outcome, model.svm.bestTune)
+
+````
+
+``` {r svr-tuning-log}
+
+
+# # perform a grid search
+# set.seed(123)
+# tuneResult.log <- tune(svm, log(amount_spent+1)~., data= train,
+#               ranges = list(epsilon = seq(0,1,0.1), cost = 2^(2:9))
+# )
+# print(tuneResult.log)
+# # Draw the tuning graph
+# plot(tuneResult.log)
+# 
+# set.seed(123)
+# tuneResult2.log <- tune(svm, log(amount_spent+1)~., data= train,
+#               ranges = list(epsilon = seq(.42,.55,0.01), cost = seq(2,8,1))
+# )
+# print(tuneResult2.log) 
+# plot(tuneResult2.log)
+# 
+# set.seed(123)
+# tuneResult3.log <- tune(svm, log(amount_spent+1)~., data= train,
+#               ranges = list(epsilon = seq(.48,.53,0.01), cost = seq(.1,3.1,.5))
+# )
+# print(tuneResult3.log)
+# plot(tuneResult3.log)
+# 
+# set.seed(123)
+# tuneResult4.log <- tune(svm, log(amount_spent+1)~., data= train,
+#               ranges = list(epsilon = seq(.495,.51,0.005), cost = seq(.05,.15,.1))
+# )
+# print(tuneResult4.log)
+# plot(tuneResult4.log)
+# 
+# set.seed(123)
+# tuneResult5.log <- tune(svm, log(amount_spent+1)~., data= train,
+#               ranges = list(epsilon = seq(.505,.52,0.002), cost = seq(.01,.06,.01))
+# )
+# print(tuneResult5.log)
+# plot(tuneResult5.log)
+
+set.seed(123)
+tuneResult6.log <- tune(svm, log(amount_spent+1)~., data= train,
+              ranges = list(epsilon = seq(.528,.552,0.003), cost = seq(.01,.03,.01))
+)
+print(tuneResult6.log)
+plot(tuneResult6.log)
+
+model.svm.log.bestTune <- tuneResult6.log$best.model
+compare_models(test, train, test_outcome, model.svm.log.bestTune)
+
+````
+
+### Model Training
+
+``` {r model-training}
+
+
+## since heavily positive-skewed and bounded at 0, trying log of amount spent
+set.seed(123)
+model.log <- train(log(amount_spent+1) ~., train, method='lm')
+
+set.seed(123)
+model.svm.tuned <- svm(amount_spent ~., data=train, epsilon=.51, cost=.16)
+
+set.seed(123)
+model.svm.log.tuned <- svm(log(amount_spent+1) ~., data=train, epsilon=.549, cost=.01)
+
+set.seed(123)
+model.svm.simple <- svm(amount_spent~., data = train)
+
+set.seed(123)
+model.lm <- train(amount_spent ~., train, method='lm')
+
+```
+
+### Model Comparison
+
+``` {r model-comparison}
+
+compare_models(test, train, test_outcome, model.svm.simple)
+compare_models(test, train, test_outcome, model.svm.tuned)
+compare_models(test, train, test_outcome, model.svm.log.tuned)
+compare_models(test, train, test_outcome, model.lm)
+compare_models(test, train, test_outcome, model.log)
+
+
+```
+
+
+
+## Review Text Analysis
+
+``` {r eda-text}
+
+## check for null review text
+which(!complete.cases(reviews$text))
+
+reviews <- reviews %>% 
+  mutate(
+    text = as.character(text),
+    valence = factor(ifelse(reviews$star<3, "Negative", "Positive"))
+  )
+summary(reviews)
+
+ggplot(reviews, aes(str_length(text), fill=factor(star))) + 
+  geom_boxplot() + 
+  ggtitle("review length ~ star rating")
+
+```
+
+### Data prep
+
+``` {r dfm-tfidf}
+
+## create corpus and include star rating for segmenting
+reviews.corpus <- corpus(reviews$text)
+docvars(reviews.corpus, "star") <- reviews$star
+docvars(reviews.corpus, "valence") <- reviews$valence
+
+reviews.dfm <- dfm(reviews.corpus, 
+                   remove=stopwords('english'), 
+                   remove_punct=TRUE, 
+                   remove_symbols=TRUE, 
+                   remove_separators=TRUE,
+                   )
+
+reviews.dfm.valence <- dfm(reviews.corpus, 
+                   remove=stopwords('english'), 
+                   remove_punct=TRUE, 
+                   remove_symbols=TRUE, 
+                   remove_separators=TRUE,
+                   groups = 'valence'
+                   )
+
+reviews.dfm.star <- dfm(reviews.corpus, 
+                   remove=stopwords('english'), 
+                   remove_punct=TRUE, 
+                   remove_symbols=TRUE, 
+                   remove_separators=TRUE,
+                   groups = 'star'
+                   )
+
+reviews.tfidf <- dfm_tfidf(reviews.dfm)
+```
+
+### Word Clouds
+
+``` {r word-clouds, warning=F, message=F}
+
+set.seed(100)
+
+textplot_wordcloud(reviews.dfm, 
+                   min_count=3, 
+                   random_order = FALSE,
+                   rotation=.25,
+                   color = RColorBrewer::brewer.pal(8,"Dark2")
+                   )
+
+textplot_wordcloud(reviews.dfm.valence,
+                   comparison=TRUE,
+                   min_count=3
+                   )
+
+textplot_wordcloud(reviews.dfm.star,
+                   comparison=TRUE,
+                   min_count=3
+                   )
+
+```
+
+### Keyness
+
+``` {r keyness}
+reviews.keyness <- textstat_keyness(reviews.dfm, target=reviews$valence=="Positive")
+textplot_keyness(reviews.keyness, margin=.1, n=13)
+```
+
+
+### Topic Modeling: Quanteda
+
+I used Quanteda and SeededLDA to practice a different LDA implementation. A knitting error is preventing me from including the code. The output in RStudio is:
+
+| topic1 | topic2 | topic3 | 
+|:------:|:------:|:------:|
+| movie | time | food |  
+| great | back | just |
+| place | moviemagic | go |
+| food | cinema | like |
+| fun | movies | popcorn |
+| good | also | get |
+| love | really | beer |
+| can | going | ordered |
+| pizza | good | really |
+| theater | awesome | got |
+
+``` {r lda-1, eval=FALSE}
+
+model_lda <- textmodel_lda(reviews.dfm, k=3)
+# as.data.frame(terms(model_lda, 10))
+
+```
+
+### Topic Modeling: e1071
+
+```{r lda-2}
+
+
+# perform a Latent Dirichlet Analysis (several lines of code to get you started)
+# first remove stop words
+corpus <- VCorpus(VectorSource(reviews$text))
+# a function to clean /,@,\\,|
+toSpace <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+corpus <- tm_map(corpus, toSpace, "/|@|\\|")
+corpus<- tm_map(corpus, stripWhitespace) # remove white space
+# covert all to lower case else same word as lower and uppercase will classified as different
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removeNumbers) # remove numbers
+corpus <- tm_map(corpus, removePunctuation) # remove punctuations
+corpus <- tm_map(corpus, removeWords, stopwords("en"))
+dtm <- DocumentTermMatrix(corpus)
+set.seed(234)
+rowTotals <- apply(dtm , 1, sum)
+dtm <- dtm[rowTotals> 0, ]
+lda <- LDA(dtm, k = 3, method = "Gibbs", control = NULL)
+topics <- tidytext::tidy(lda, matrix = "beta") # beta is the topic-word density
+
+top_terms <- topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>% # top_n picks 10 topics.
+  ungroup() %>%
+  arrange(topic, -beta)
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+
+
+# perplexity calculation - change k = values
+lda.def <- LDA(dtm, k = 4, control = NULL) 
+perplexity(lda.def)
+
+
+```
+
+
+---
+
+
+# Questions
+
+* For questions 1, 2, 3, and 4, the first dataset project_data would be used.
+* For Questions 1, 2 and 3 use the complete dataset (do not split it into train and test sets)
+* For question 4 split the dataset into train and test. You can try different splits; indicate
+what proportion you split the data when you compared SVR and linear regression.
+* For questions 5 and 6, you would be using the second dataset, the project_reviews
+dataset.
+
+---
+
+## Q1-3 Model
+
+``` {r q1-q2-q3}
+summary(model.lm.fullset) 
+```
+
+
+### Question 1
+
+**Of the 8 predictors, which predictors have a significant influence on amount spent on concessions?**
+Running a simple linear regression including all the original variables and no pre-processing yields a model showing 2 variables are highly correlated with concession purchasing amount (p<.01):
+
+* having a job as wait-staff 
+* having a tiertiary education degree 
+
+In my opinion, these results should not be acted upon, as the model is only able to explain 2.5% of the variability of amount someone spends on consessions. I used the model *model.lm.fullset* to answer this question.
+
+
+### Question 2
+
+**Which predictors have a positive influence and which predictors have a negative influence on the amount spent on concessions? Which analysis, regression or SVR, helped you answer this question?**
+
+These variables have a *positive* correlation or influence with the amount spent on consessions:
+
+* Age (age)
+* Having a job as an entrepreneur, management, services,unemployed, unknown, or as wait-staff (jobentrepreneur, jobmanagement, jobservices, jobunemployed, jobunknown, jobwait-staff)
+* unknown, secondar, or tertiary education status (educationsecondary, educationtertiary, educationunknown)
+* Received a discount coupon (discountyes)
+* number of days they've been a member (days_member)
+
+These variables have a *negative* correlation or influence with the amount spent on consessions:
+
+* Having a blue collar job, being self employed or retired, or being a student or technician (jobblue-collar, jobretired, jobself-employed, jobstudent, jobtechnician)
+* Being married or single (maritalmarried, maritalsingle)
+* They were seen along (seen_aloneyes)
+* The number of movies they saw (movies_seen)
+
+Since the intercept is positive, you can say holding all variables at 0, the default state has a positive influence. Since we one-hot encoded, these variables would be:
+
+* Being divorced
+* Having a primary education
+* Having a job as an admin
+* Did not receive a discount coupon
+* Were not seen alone
+
+I used a white-box, linear regression model to answer this question. SVR is a black box model and would not show coefficient values.
+
+
+### Question 3
+
+**Given the significant predictors, what strategies can MovieMagic come up with to increase amount spent on concessions?**
+
+* Create a marketing campaign aimed at those who've been a member for awhile. This campaign could center around a special incentive, like a discount coupon. 
+* Create a marketing campaign geared towards entrepreneurs and management who are hosting large groups of people. You can even look into special catering services if this proves to be a prolific spending group.
+* Offer a coupon or discount for groups buying at the consession stand.
+* Create various sized 'family deals' geared towards groups of 2-10 which are a pre-determained set of food + drink combos offered at a light discount
+* Offer a slight discount for first time members buying movie entrances on multiple days, with the intention of them buying more on consessions since they're more likely to come back for the 5th movie they pre-paid for.
+
+---
+
+## Q4 Model Comparisons
+
+``` {r q4}
+compare_models(test, train, test_outcome, model.svm.simple)
+compare_models(test, train, test_outcome, model.svm.tuned)
+compare_models(test, train, test_outcome, model.svm.log.tuned)
+compare_models(test, train, test_outcome, model.lm)
+compare_models(test, train, test_outcome, model.log)
+```
+
+### Question 4
+
+**Which analysis, linear regression or SVR, provides better prediction? Which metric would you focus on to support your answer?**
+
+I looked at both MAE and RMSE when comparing models. The simple SVR model, model.svm.simple, which used default epsilon and cost, had the lowest MAE of all models - \$476.60. The linear regression, model.lm, however, had the lowest RMSE - \$1133.40. What this tells me is model.svm.simple had greater variance of error - meaning when it was wrong, it was wrong by  more than when model.lm was wrong. Which metric (and hence which model) to use will depend on the application of the prediction and how undesirable residual variance is. 
+
+While not shown here, RMSLE might be a better metric to compare models since it might account better for the curve of amount spent - if we predict someone will spend \$50 when they spent \$5, that's a different situatin than if we predicted someone would spend \$3050 when they actually spent \$3000. RMSLE might be more appropriate if we're looking at the whole range of spending.
+
+---
+
+## Q5 Wordcloud
+
+``` {r q5, warning=F, message=F}
+
+textplot_wordcloud(reviews.dfm.valence,
+                   comparison=TRUE,
+                   min_count=3
+                   )
+
+textplot_wordcloud(reviews.dfm.star,
+                   comparison=TRUE,
+                   min_count=3
+                   )
+
+textplot_keyness(reviews.keyness, margin=.1, n=13)
+
+```
+
+### Question 5
+**MovieMagic wants to visualize the reviews through a wordcloud and wants to find out which words are used most commonly in the reviews that customers write for MovieMagic. Create 2 wordclouds - one for reviews that received 3, 4, or 5 star ratings and another with reviews that received 1 or 2 stars ratings. Knowing the prominent words in each of the wordclouds, what strategies can be developed in messaging customers? Would the strategies differ?**
+
+It appears waiting for food may be one factor in a customer's review of the theatre. I would suggest looking into measuring duratin between order submission and food delivery. This might help determine how to reduce poor reviews around consessions purchases. Such an analysis might focus on if certain items take longer to prepare, potentially causing people to miss their movie. Other factors might also influence these poor experiences such as number of employees working consessions at the time, time of day, number of movies starting within 15 minutes, or availability of certain items.   
+
+Popcorn was used in positive reviews. You might explore whether a separate line for popcorn only might increase these particular sales. I would suggest looking at whether other item sales decreae when this popcorn-only line is available. While this may gain sales for those who would be otherwise deterred from long lines, it may also decrease sales of items which would have otherwise been purchased concurrently.
+
+
+---
+
+## Q6 Topic Models
+
+``` {r q6}
+
+### from quanteda package
+# as.data.frame(terms(model_lda, 10))
+
+
+### from topic models pkg
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+
+
+```
+
+_Additional SeededLDA topic output:_
+
+| topic1 | topic2 | topic3 | 
+|:------:|:------:|:------:|
+| movie | time | food |  
+| great | back | just |
+| place | moviemagic | go |
+| food | cinema | like |
+| fun | movies | popcorn |
+| good | also | get |
+| love | really | beer |
+| can | going | ordered |
+| pizza | good | really |
+| theater | awesome | got |
+
+
+### Question 6
+
+**MovieMagic also wants to use topic modeling to find out whether the content in the reviews could be categorized into specific topics. If you used LDA to create 3 topic groups (k = 3) what would be the titles you would assign to these 3 topics. MovieMagic wants you to use the words within the topic to infer topic title. Given the topics you inferred what strategies would you suggest are possible for MovieMagic if it wants to increase concession sales. Would you recommend promotions or advertising or loyalty program; justify your choice of strategy?**
+
+*Topic 1 - Classic Date Night*
+
+Need to get back to basics with your beau? We have a full menu for your and yours to indulge over while snuggled up in front of the big screen. 
+Suggestions: When the alternative for date night includes finding and paying for both dinner and the movie and rushing in traffic to make sure you arrive on time, make it an easy choice for couples to dine at the teatre instead. This might include offering higher end meals paired with wines or a quiet, more upscale seating area where kids are not allowed for couples to reconnect before the movie. Everyone loves a good wine pairing. 
+
+*Topic 2 - The Magic of Movies -or- Wholesome Family Tradition*
+
+Grab some popcorn and snacks and enjoy a fun flick with the whole family. 
+Suggestions: Make it easy for parents bringing a kid or two -or even their 4 or 5 friends! Put together 'Family Bundles' with the most frequently co-purchased items catering to families or easy low-choice selections - each kid chooses 1 snack and 1 drink from a list. Take out the stress of coordinating food selections.
+
+*Topic 3 - Kick Back*
+
+Powerful sound system, full range high density graphics, and comfortable recliners to enjoy some cold beer and hot pizza with friends - this sounds like a place to relieve some stress. If you haven't yet, look to expand your beer offerings! If there's a better selection than competitors, you might be able to charge more for simply having a better selection available. Look to offer a discount when purchasing beer with food, especially in bulk - free 6th beer when bought with 2 pizzas, for example.
+
+
